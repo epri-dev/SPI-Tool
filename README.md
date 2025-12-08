@@ -6,7 +6,11 @@
 
 Stochastic Planning Inputs Tool (SPI-Tool), pronounced “spy tool”, is a desktop application that helps electric system resource planners analyze and characterize the uncertainty in resource planning inputs.
 
-## Usage
+## Install
+
+Download precompiled distributable from the [releases](https://github.com/epri-dev/SPI-Tool/releases/latest) and run the executable.
+
+Alternatively, if you want to build from source, you can following the following instructions:
 
 1. Install `uv`:
 
