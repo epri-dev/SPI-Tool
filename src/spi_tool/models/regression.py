@@ -685,7 +685,11 @@ class TimeseriesPredictionModel(param.Parameterized):
         watch=True,
     )
     def output_dataframe(self) -> pd.DataFrame:
-        if self.input_df is None or self.prediction_df is None or self.fit_result is None:
+        if (
+            self.input_df is None
+            or self.prediction_df is None
+            or self.fit_result is None
+        ):
             self.ready = False
             return pd.DataFrame()
 
@@ -1344,9 +1348,11 @@ class TimeseriesPredictionModel(param.Parameterized):
 
         self.prediction_df_view = pn.Card(
             pn.bind(
-                lambda distribution: normal_distribution_explanation
-                if distribution == "normal"
-                else lognormal_distribution_explanation,
+                lambda distribution: (
+                    normal_distribution_explanation
+                    if distribution == "normal"
+                    else lognormal_distribution_explanation
+                ),
                 self.param.regression_kind,
             ),
             pn.widgets.Tabulator.from_param(
@@ -1432,7 +1438,7 @@ class TimeseriesPredictionModel(param.Parameterized):
             try:
                 drp.start = df.index[0].date()
                 drp.end = df.index[-1].date()
-            except Exception as e:
+            except Exception:
                 drp.value = (
                     df.index[0].date() + pd.Timedelta(days=1),
                     df.index[-1].date(),

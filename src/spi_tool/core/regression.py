@@ -31,9 +31,7 @@ class RegressionConfig:
 
     def __post_init__(self) -> None:
         if self.regression_kind not in {"normal", "lognormal"}:
-            raise ValueError(
-                "regression_kind must be either 'normal' or 'lognormal'"
-            )
+            raise ValueError("regression_kind must be either 'normal' or 'lognormal'")
         if self.regression_y_term != "lag_1":
             raise ValueError("Only lag_1 regression is currently supported")
         if self.n_samples < 1:

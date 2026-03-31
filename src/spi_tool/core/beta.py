@@ -112,9 +112,9 @@ def generate_beta_samples(
 
     output_samples = {}
     for sample in prediction_df.index:
-        output_samples[sample] = (
-            (high_df - low_df) * prediction_df.loc[sample, "scaling_factor"] + low_df
-        )
+        output_samples[sample] = (high_df - low_df) * prediction_df.loc[
+            sample, "scaling_factor"
+        ] + low_df
 
     return pd.DataFrame(output_samples), lower_bound, upper_bound
 
