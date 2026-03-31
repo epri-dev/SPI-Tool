@@ -1,11 +1,12 @@
 import panel as pn
-import os
 
-from . import _utils
-from . import pages
+from .bootstrap import configure
 
 
 def create_app():
+    configure()
+    from . import pages
+
     template = pn.template.MaterialTemplate(
         title="SPI-Tool Dashboard",
         # logo=os.path.join(_utils.IMAGE_FOLDER_PATH, "SPI-Tool-no-text-BW.jpg"),

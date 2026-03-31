@@ -10,6 +10,8 @@ import matplotlib as mpl
 
 from .. import _utils
 from .. import _helper
+from ..core import beta as beta_core
+from ..core.common import warnings_to_message
 
 
 class TimeseriesScenarioInput(pm.Parameterized):
@@ -29,16 +31,10 @@ class TimeseriesScenarioInput(pm.Parameterized):
     ready = pm.Boolean(False, precedence=-1)
 
     def get_data(self, filename):
-        df = pd.read_csv(filename, header=[0, 1], index_col=0, parse_dates=True)
-        self.unit = list(set(col[1].strip() for col in df.columns))[0]
-        df.index.name = "date"
-        if df.index.duplicated().any():
-            self.has_warning = True
-            duplicated_dates = df.index[df.index.duplicated()].unique()
-            self.warning_message = f"Duplicated dates found.\nAveraging values for dates: {list(duplicated_dates)}"
-        df.columns = [col[0].strip() for col in df.columns]
-        df = df.ffill().bfill().resample("1YS").mean().interpolate()
-        return df
+        loaded_data = beta_core.load_beta_input(filename)
+        self.warning_message = warnings_to_message(loaded_data.warnings)
+        self.has_warning = bool(loaded_data.warnings)
+        return loaded_data.data, loaded_data.unit
 
     def generate_sample_data_csv(self):
         df = pd.read_csv(self.default_filename)
@@ -51,9 +47,10 @@ class TimeseriesScenarioInput(pm.Parameterized):
         self.error = False
         self.ready = False
         self.has_warning = False
+        self.warning_message = ""
         filename = self.default_filename
         try:
-            self.input_df = self.get_data(filename=filename)
+            self.input_df, self.unit = self.get_data(filename=filename)
             self.input_df = self.input_df[
                 [
                     col
@@ -76,13 +73,14 @@ class TimeseriesScenarioInput(pm.Parameterized):
     def load_data(self, event=None):
         self.error = False
         self.has_warning = False
+        self.warning_message = ""
         self.ready = False
         if self.filename is None:
             filename = self.default_filename
         else:
             filename = io.BytesIO(self.filename)
         try:
-            self.input_df = self.get_data(filename=filename)
+            self.input_df, self.unit = self.get_data(filename=filename)
             self.ready = True
         except Exception as e:
             self.error_message = f"**Error:** {str(e)}"
@@ -322,6 +320,10 @@ class BetaPredictionModel(pm.Parameterized):
 
     ready = pm.Boolean(False, precedence=-1)
 
+    def __init__(self, **params):
+        super().__init__(**params)
+        self.run_result = None
+
     @pm.depends("input_df", watch=True, on_init=True)
     def _update_low_high(self):
         if self.input_df is None:
@@ -337,18 +339,14 @@ class BetaPredictionModel(pm.Parameterized):
 
     @pm.depends("random_seed", "n_samples", "alpha", "beta", watch=True, on_init=True)
     def _update_prediction_df(self):
-        self.samples = [f"sample_{i + 1}" for i in range(0, self.n_samples)]
-
-        np.random.seed(self.random_seed)
-
-        random_values = np.random.rand(self.n_samples)
-
-        self.prediction_df = pd.DataFrame(
-            data=scipy.stats.beta.ppf(random_values, self.alpha, self.beta),
-            index=self.samples,
-            columns=["scaling_factor"],
+        config = beta_core.BetaConfig(
+            alpha=self.alpha,
+            beta=self.beta,
+            random_seed=self.random_seed,
+            n_samples=self.n_samples,
         )
-        self.prediction_df.index.name = "sample"
+        self.prediction_df = beta_core.generate_beta_scaling_factors(config)
+        self.samples = list(self.prediction_df.index)
 
     @pm.depends(
         "input_df",
@@ -365,17 +363,21 @@ class BetaPredictionModel(pm.Parameterized):
             or self.scenario_bound_1 is None
             or self.scenario_bound_2 is None
         ):
+            self.ready = False
             return
-        low_df = self.input_df[self.scenario_bound_1]
-        high_df = self.input_df[self.scenario_bound_2]
-
-        output_samples = {}
-        for sample in self.samples:
-            output_samples[sample] = (high_df - low_df) * self.prediction_df.loc[
-                sample, "scaling_factor"
-            ] + low_df
-
-        self.output_df = pd.DataFrame(output_samples)
+        config = beta_core.BetaConfig(
+            alpha=self.alpha,
+            beta=self.beta,
+            random_seed=self.random_seed,
+            n_samples=self.n_samples,
+            scenario_bound_1=self.scenario_bound_1,
+            scenario_bound_2=self.scenario_bound_2,
+        )
+        self.run_result = beta_core.run_beta_analysis(self.input_df, config)
+        self.output_df = self.run_result.output_df
+        self.scenario_bound_1 = self.run_result.scenario_bound_1
+        self.scenario_bound_2 = self.run_result.scenario_bound_2
+        self.ready = True
 
     @pm.depends("input_df", "scenario_bound_1", "scenario_bound_2")
     def plot_inputs(self):
