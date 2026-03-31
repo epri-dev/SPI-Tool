@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import param
-import scipy
 import panel as pn
 import calendar
 import os
@@ -9,33 +8,16 @@ import io
 import datetime
 import matplotlib as mpl
 import math
-import warnings
 import statsmodels.api as sm
 
 from .. import _utils
 from .. import _helper
+from ..core import regression as regression_core
+from ..core.common import warnings_to_message
 
 
 def linear_regression(x, y):
-    slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(x, y)
-
-    y_predictions = intercept + slope * x
-
-    steyx = np.sqrt(np.sum((y - y_predictions) ** 2) / (len(y) - 2))
-    mean_reversion = -float(slope)
-    long_run_mean = float(intercept / -slope)
-    volatility = abs(float((steyx / long_run_mean) * 100))
-
-    return dict(
-        slope=slope,
-        intercept=intercept,
-        p_value=p_value,
-        r_value=r_value,
-        steyx=steyx,
-        mean_reversion=mean_reversion,
-        long_run_mean=long_run_mean,
-        volatility=volatility,
-    )
+    return regression_core.linear_regression(x, y)
 
 
 class TimeseriesInput(param.Parameterized):
@@ -59,53 +41,18 @@ class TimeseriesInput(param.Parameterized):
     use_month = param.Boolean(default=False, allow_refs=True)
 
     def get_data(self, filename):
-        try:
-            input_df = pd.read_csv(filename, header=[0, 1], parse_dates=True)
-        except Exception as e:
-            raise ValueError(f"Error reading file: {str(e)}")
-        unit = list(set(col[1].strip() for col in input_df.columns[1:]))[-1]
-        input_df.columns = [col[0].strip() for col in input_df.columns]
-        input_df = self._validate_data(input_df)
-        return input_df, unit
-
-    def _validate_data(self, input_df):
-        required_columns = ["date", self.label.lower()]
-        if not all(col in input_df.columns for col in required_columns):
-            raise ValueError(
-                f"Data is missing required columns:\n\n\n{','.join(required_columns)}\n\n\nInstead found the following:\n\n\n{','.join(input_df.columns)}"
-            )
-
-        if input_df.index.duplicated().any():
-            self.has_warning = True
-            duplicated_dates = input_df.index[input_df.index.duplicated()].unique()
-            self.warning_message = f"Duplicated dates found.\nAveraging values for dates: {list(duplicated_dates)}"
-
-        with warnings.catch_warnings(record=True) as w:
-            pd.to_datetime(input_df["date"])
-            for warning in w:
-                self.has_warning = True
-                self.warning_message = (
-                    self.warning_message
-                    + f"Warning when parsing date column: {str(warning.message)}"
-                )
-
-        try:
-            input_df = (
-                input_df.assign(date=lambda df: pd.to_datetime(df["date"]))
-                .sort_values("date")
-                .set_index("date")
-                .dropna()
-                .resample("1D")
-                .mean()
-                .interpolate()
-            )
-        except Exception as e:
-            raise ValueError(f"Error parsing date column: {str(e)}")
-        return input_df
+        loaded_data = regression_core.load_regression_input(
+            filename,
+            label=self.label,
+        )
+        self.warning_message = warnings_to_message(loaded_data.warnings)
+        self.has_warning = bool(loaded_data.warnings)
+        return loaded_data.data, loaded_data.unit
 
     def load_data(self, filename):
         self.error = False
         self.has_warning = False
+        self.warning_message = ""
         self.ready = False
         try:
             df, unit = self.get_data(filename=filename)
@@ -576,6 +523,7 @@ class TimeseriesPredictionModel(param.Parameterized):
 
     def __init__(self, **params):
         super().__init__(**params)
+        self.fit_result = None
 
     @param.depends("input_df", watch=True, on_init=True)
     def _update_end_date_bounds(self):
@@ -601,31 +549,12 @@ class TimeseriesPredictionModel(param.Parameterized):
         self.random_seed = np.random.randint(0, 2**16)
 
     def compute_processed_df(self):
-        df = (
-            self.input_df.resample("1D")
-            .mean()
-            .interpolate()
-            .reset_index()
-            .assign(date=lambda x: pd.to_datetime(x["date"]))
-            .set_index("date")
-        )
-
-        df = (
-            df.assign(
-                month=lambda df: df.index.month_name().str[0:3],
-                day_type=lambda df: [
-                    "Weekday" if x.dayofweek < 5 else "Weekend" for x in df.index
-                ],
-                normal_values=lambda df: df[self.label.lower()],
-                lognormal_values=lambda df: np.log(df["normal_values"].values),
-                normal_lag_1_values=lambda df: df["normal_values"].shift(1),
-                lognormal_lag_1_values=lambda df: df["lognormal_values"].shift(1),
-            )
-            .assign(
-                month=lambda df: df["month"].shift(1 if self.shift else 0),
-                day_type=lambda df: df["day_type"].shift(1 if self.shift else 0),
-            )
-            .dropna()
+        df = regression_core.prepare_regression_dataframe(
+            self.input_df,
+            label=self.label,
+            use_day_type=self.use_day_type,
+            use_month=self.use_month,
+            shift=self.shift,
         )
 
         self.ylim_lower = 0.5 * df["normal_values"].min()
@@ -633,15 +562,6 @@ class TimeseriesPredictionModel(param.Parameterized):
 
         self.xlim_lower = df.index[0]
         self.xlim_upper = self.end_date
-
-        if self.use_day_type and self.use_month:
-            df = df.assign(parameter_index=lambda df: df.day_type + "-" + df.month)
-        elif self.use_day_type:
-            df = df.assign(parameter_index=lambda df: df.day_type)
-        elif self.use_month:
-            df = df.assign(parameter_index=lambda df: df.month)
-        else:
-            df = df.assign(parameter_index="all")
 
         return df
 
@@ -705,26 +625,31 @@ class TimeseriesPredictionModel(param.Parameterized):
 
     @param.depends("processed_df", "regression_kind", watch=True)
     def _update_prediction_df(self):
-        indices, xs, ys = self._calculate_indices_x_y()
+        if self.processed_df is None:
+            self.indices = []
+            self.xs = []
+            self.ys = []
+            self.precomputed_predictions = {}
+            self.prediction_df = None
+            return
 
-        self.indices = indices
-        self.xs = xs
-        self.ys = ys
-
-        results = []
-        for x, y in zip(xs, ys):
-            r = linear_regression(x, y)
-            results.append(r)
-
-        df = pd.DataFrame(
-            index=indices,
-            data=results,
+        self.fit_result = regression_core.fit_regression_parameters(
+            self.processed_df,
+            regression_kind=self.regression_kind,
+            regression_y_term=self.regression_y_term,
+            use_day_type=self.use_day_type,
+            use_month=self.use_month,
         )
-        self.precomputed_predictions = {
-            index: dict(df.query("index == @index").iloc[0]) for index in indices
-        }
 
-        self.prediction_df = df
+        self.indices = self.fit_result.indices
+        self.xs = [
+            self.fit_result.grouped_pairs[index][0] for index in self.fit_result.indices
+        ]
+        self.ys = [
+            self.fit_result.grouped_pairs[index][1] for index in self.fit_result.indices
+        ]
+        self.precomputed_predictions = self.fit_result.predictions_by_index
+        self.prediction_df = self.fit_result.prediction_df
 
     def _get_predictions_from_table(self, dt) -> dict:
         if self.use_day_type and self.use_month:
@@ -743,32 +668,13 @@ class TimeseriesPredictionModel(param.Parameterized):
         return self.precomputed_predictions[index]
 
     def generate_sample(self, predictions) -> np.array:
-        output_values = np.full(
-            len(predictions), self.processed_df["normal_values"].values[-1]
-        ).astype("float64")
-
-        randomness = scipy.stats.norm.ppf(np.random.rand(len(output_values)))
-
-        slopes = np.array([p["slope"] for p in predictions])
-        steyxes = np.array([p["steyx"] for p in predictions])
-        intercepts = np.array([p["intercept"] for p in predictions])
-
-        # this has to be a for loop because previous value is used to calculate next value
-        for i in range(1, len(output_values)):
-            if self.regression_kind == "normal":
-                output_values[i] = (
-                    intercepts[i]
-                    + slopes[i] * output_values[i - 1]
-                    + steyxes[i] * randomness[i]
-                )
-            elif self.regression_kind == "lognormal":
-                output_values[i] = np.exp(
-                    intercepts[i]
-                    + slopes[i] * np.log(output_values[i - 1])
-                    + steyxes[i] * randomness[i]
-                )
-
-        return output_values
+        rng = np.random.RandomState(self.random_seed)
+        return regression_core.generate_regression_sample(
+            predictions,
+            processed_df=self.processed_df,
+            regression_kind=self.regression_kind,
+            rng=rng,
+        )
 
     @param.depends(
         "prediction_df",
@@ -779,27 +685,38 @@ class TimeseriesPredictionModel(param.Parameterized):
         watch=True,
     )
     def output_dataframe(self) -> pd.DataFrame:
-        if self.input_df is None or self.prediction_df is None:
+        if (
+            self.input_df is None
+            or self.prediction_df is None
+            or self.fit_result is None
+        ):
+            self.ready = False
             return pd.DataFrame()
 
-        np.random.seed(self.random_seed)
-        output_dates = self._calculate_dates()
-
-        output_df = pd.DataFrame(data=dict(date=output_dates)).set_index("date")
-
-        predictions = [self._get_predictions_from_table(date) for date in output_dates]
-
-        long_run_mean = self.input_df[self.label.lower()].mean()
-
-        growth_multiplier = (long_run_mean * output_df.reset_index().index) * (
-            self.annual_growth_rate / 365 / 100
+        config = regression_core.RegressionConfig(
+            label=self.label,
+            regression_kind=self.regression_kind,
+            regression_y_term=self.regression_y_term,
+            use_day_type=self.use_day_type,
+            use_month=self.use_month,
+            shift=self.shift,
+            end_date=self.end_date,
+            random_seed=self.random_seed,
+            n_samples=self.n_samples,
+            annual_growth_rate=self.annual_growth_rate,
+        )
+        output_df, resolved_end_date = regression_core.generate_regression_samples(
+            self.input_df,
+            self.processed_df,
+            self.fit_result,
+            config=config,
         )
 
-        for s in range(self.n_samples):
-            output_values = self.generate_sample(predictions)
-            output_df[f"sample_{s + 1}"] = output_values + growth_multiplier
+        with param.parameterized.discard_events(self):
+            self.end_date = resolved_end_date.date()
 
         self.output_df = output_df
+        self.ready = True
         return self.output_df
 
     def generate_predictions_csv(self):
@@ -1431,9 +1348,11 @@ class TimeseriesPredictionModel(param.Parameterized):
 
         self.prediction_df_view = pn.Card(
             pn.bind(
-                lambda distribution: normal_distribution_explanation
-                if distribution == "normal"
-                else lognormal_distribution_explanation,
+                lambda distribution: (
+                    normal_distribution_explanation
+                    if distribution == "normal"
+                    else lognormal_distribution_explanation
+                ),
                 self.param.regression_kind,
             ),
             pn.widgets.Tabulator.from_param(
@@ -1519,7 +1438,7 @@ class TimeseriesPredictionModel(param.Parameterized):
             try:
                 drp.start = df.index[0].date()
                 drp.end = df.index[-1].date()
-            except Exception as e:
+            except Exception:
                 drp.value = (
                     df.index[0].date() + pd.Timedelta(days=1),
                     df.index[-1].date(),

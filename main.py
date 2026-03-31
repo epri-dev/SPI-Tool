@@ -1,11 +1,10 @@
 print("Launching SPI-Tool dashboard...")
 
-import spi_tool  # noqa
+from spi_tool.cli import cli
+from spi_tool.ui import create_app
 
-spi_tool.cli.create_app().servable()
+create_app().servable()
 
 if __name__ == "__main__":
-    # Create a Click context
-    with spi_tool.cli.cli.make_context("cli", ["dashboard", "--show"]) as ctx:
-        # Call the dashboard subcommand
-        spi_tool.cli.cli.invoke(ctx)
+    with cli.make_context("cli", ["dashboard", "--show"]) as ctx:
+        cli.invoke(ctx)
